@@ -35,6 +35,8 @@ public class Emissor {
 
     private static final int TIMEOUT_MS = 500;
     private static final int PORTA_PADRAO_RECEPTOR = 5000;
+    private static final int PORTA_MINIMA = 1;
+    private static final int PORTA_MAXIMA = 65535;
 
     // ---- Estado compartilhado entre as threads de envio e de recepção de ACK ----
     private final Object lock = new Object();
@@ -53,30 +55,80 @@ public class Emissor {
     // ---- Estatísticas ----
     private final AtomicLong totalEnviados = new AtomicLong(0);
     private final AtomicLong totalAcksRecebidos = new AtomicLong(0);
-    private final AtomicLong totalRetransmissoes = new AtomicLong(0);
+    private final AtomicLong totalPacotesRetransmitidos = new AtomicLong(0);
+    private final AtomicLong totalTimeouts = new AtomicLong(0);
     private final AtomicBoolean transmissaoFinalizada = new AtomicBoolean(false);
 
     public static void main(String[] args) {
         System.setOut(new PrintStream(System.out, true, StandardCharsets.UTF_8));
         System.setErr(new PrintStream(System.err, true, StandardCharsets.UTF_8));
 
-        if (args.length < 4) {
-            System.out.println("Uso: java Emissor <arquivo_origem> <IP_destino>:<path_destino> "
-                    + "<tamanho_janela> <prob_perda> [porta]");
-            System.out.println("Exemplo: java Emissor /home/alice/foto.jpg "
-                    + "192.168.0.10:/tmp/foto_recebida.jpg 8 0.10");
+        if (args.length < 4 || args.length > 5) {
+            imprimirUso();
             return;
         }
 
         String arquivoOrigem = args[0];
         String destinoCompleto = args[1];
-        int tamanhoJanela = Integer.parseInt(args[2]);
-        double probPerda = Double.parseDouble(args[3]);
-        int porta = args.length >= 5 ? Integer.parseInt(args[4]) : PORTA_PADRAO_RECEPTOR;
+        int tamanhoJanela;
+        double probPerda;
+        int porta = PORTA_PADRAO_RECEPTOR;
+
+        try {
+            tamanhoJanela = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            System.err.println("[Emissor] Tamanho da janela inválido: " + args[2]);
+            System.err.println("[Emissor] Informe um número inteiro maior que zero.");
+            imprimirUso();
+            return;
+        }
+
+        if (tamanhoJanela <= 0) {
+            System.err.println("[Emissor] Tamanho da janela inválido: " + tamanhoJanela);
+            System.err.println("[Emissor] O tamanho da janela deve ser maior que zero.");
+            imprimirUso();
+            return;
+        }
+
+        try {
+            probPerda = Double.parseDouble(args[3]);
+        } catch (NumberFormatException e) {
+            System.err.println("[Emissor] Probabilidade de perda inválida: " + args[3]);
+            System.err.println("[Emissor] Informe um valor real entre 0.0 e 1.0.");
+            imprimirUso();
+            return;
+        }
+
+        if (Double.isNaN(probPerda) || Double.isInfinite(probPerda)
+                || probPerda < 0.0 || probPerda > 1.0) {
+            System.err.println("[Emissor] Probabilidade de perda fora do intervalo permitido: " + args[3]);
+            System.err.println("[Emissor] O valor deve estar entre 0.0 e 1.0.");
+            imprimirUso();
+            return;
+        }
+
+        if (args.length == 5) {
+            try {
+                porta = Integer.parseInt(args[4]);
+            } catch (NumberFormatException e) {
+                System.err.println("[Emissor] Porta inválida: " + args[4]);
+                System.err.println("[Emissor] Informe uma porta UDP entre 1 e 65535.");
+                imprimirUso();
+                return;
+            }
+            if (porta < PORTA_MINIMA || porta > PORTA_MAXIMA) {
+                System.err.println("[Emissor] Porta fora do intervalo permitido: " + porta);
+                System.err.println("[Emissor] Informe uma porta UDP entre 1 e 65535.");
+                imprimirUso();
+                return;
+            }
+        }
 
         int idxDoisPontos = destinoCompleto.indexOf(':');
-        if (idxDoisPontos < 0) {
-            System.err.println("Formato inválido para IP_destino:path_destino. Exemplo: 192.168.0.10:/tmp/saida.jpg");
+        if (idxDoisPontos <= 0 || idxDoisPontos == destinoCompleto.length() - 1) {
+            System.err.println("[Emissor] Destino inválido: " + destinoCompleto);
+            System.err.println("[Emissor] Use o formato <IP_destino>:<path_destino>.");
+            imprimirUso();
             return;
         }
         String ipDestino = destinoCompleto.substring(0, idxDoisPontos);
@@ -92,13 +144,19 @@ public class Emissor {
         }
     }
 
+    private static void imprimirUso() {
+        System.err.println("Uso: java Emissor <arquivo_origem> <IP_destino>:<path_destino> "
+                + "<tamanho_janela> <prob_perda> [porta]");
+        System.err.println("Exemplo: java Emissor /home/alice/foto.jpg "
+                + "192.168.0.10:/tmp/foto_recebida.jpg 8 0.10");
+    }
+
     public void transmitir(String arquivoOrigem, String ipDestino, String pathDestino,
                             int tamanhoJanela, double probPerda, int porta)
             throws IOException, NoSuchAlgorithmException {
 
         this.windowSize = tamanhoJanela;
         this.bufferEnvio = new ArrayList<>();
-        this.scheduler = Executors.newSingleThreadScheduledExecutor();
 
         java.io.File arquivo = new java.io.File(arquivoOrigem);
         if (!arquivo.exists()) {
@@ -106,6 +164,8 @@ public class Emissor {
             return;
         }
         long tamanhoArquivo = arquivo.length();
+
+        this.scheduler = Executors.newSingleThreadScheduledExecutor();
 
         socket = new DatagramSocket();
         enderecoDestino = InetAddress.getByName(ipDestino);
@@ -153,14 +213,14 @@ public class Emissor {
             todosPacotes.add(Pacote.criarData(i, segmentos.get(i)));
         }
 
-        // ---------- 3) Thread de recepção de ACKs ----------
-        Thread threadAcks = new Thread(() -> escutarAcks(totalSegmentos));
+        // ---------- 3) Início da medição e thread de recepção de ACKs ----------
+        long inicioMs = System.currentTimeMillis();
+
+        Thread threadAcks = new Thread(() -> escutarAcks(totalSegmentos, tamanhoArquivo, inicioMs));
         threadAcks.setDaemon(true);
         threadAcks.start();
 
         // ---------- 4) FSM do emissor: envia respeitando a janela ----------
-        long inicioMs = System.currentTimeMillis();
-
         int proximoASerEnviado = 0; // índice no array todosPacotes
         while (true) {
             synchronized (lock) {
@@ -188,9 +248,7 @@ public class Emissor {
                     proximoASerEnviado++;
 
                     if (totalEnviados.get() % 50 == 0) {
-                        System.out.println("[Emissor] " + totalEnviados.get() + " pacotes enviados | "
-                                + "ACKs recebidos=" + totalAcksRecebidos.get()
-                                + " | retransmissões=" + totalRetransmissoes.get());
+                        imprimirProgresso(tamanhoArquivo, inicioMs);
                     }
                 }
             }
@@ -220,7 +278,8 @@ public class Emissor {
         System.out.println("Total de segmentos: " + totalSegmentos);
         System.out.println("Total de pacotes enviados (incluindo retransmissões): " + totalEnviados.get());
         System.out.println("Total de ACKs recebidos: " + totalAcksRecebidos.get());
-        System.out.println("Total de retransmissões (timeouts): " + totalRetransmissoes.get());
+        System.out.println("Total de pacotes retransmitidos: " + totalPacotesRetransmitidos.get());
+        System.out.println("Total de eventos de timeout: " + totalTimeouts.get());
         System.out.println("Tempo total de transferência: " + duracaoMs + " ms");
         System.out.printf("Throughput estimado: %.2f KB/s%n", throughputKBps);
         System.out.println("Hash MD5 original: " + hashOriginal);
@@ -233,7 +292,7 @@ public class Emissor {
     /**
      * Thread dedicada a escutar ACKs cumulativos vindos do Receptor e avançar a base da janela.
      */
-    private void escutarAcks(int totalSegmentos) {
+    private void escutarAcks(int totalSegmentos, long tamanhoArquivo, long inicioMs) {
         byte[] buf = new byte[Pacote.TAMANHO_MAX_PACOTE];
         while (!transmissaoFinalizada.get()) {
             try {
@@ -261,6 +320,10 @@ public class Emissor {
                         } else {
                             // ainda há pacotes não confirmados: reinicia o timer
                             reiniciarTimerSemLer();
+                        }
+
+                        if (numAck == 0 || base % 50 == 0 || base >= totalSegmentos) {
+                            imprimirProgresso(tamanhoArquivo, inicioMs);
                         }
                     }
                     // ACKs antigos/duplicados (numAck < base) são ignorados, como manda a FSM do GBN
@@ -312,13 +375,14 @@ public class Emissor {
             }
 
             System.out.println("[Emissor] TIMEOUT! Retransmitindo pacotes " + base + " até " + (nextSeqNum - 1));
+            totalTimeouts.incrementAndGet();
 
             for (int seq = base; seq < nextSeqNum; seq++) {
                 if (seq < bufferEnvio.size() && bufferEnvio.get(seq) != null) {
                     try {
                         enviarPacoteBruto(bufferEnvio.get(seq));
                         totalEnviados.incrementAndGet();
-                        totalRetransmissoes.incrementAndGet();
+                        totalPacotesRetransmitidos.incrementAndGet();
                     } catch (IOException e) {
                         System.err.println("[Emissor] Erro ao retransmitir pacote seq=" + seq + ": " + e.getMessage());
                     }
@@ -328,6 +392,20 @@ public class Emissor {
             // reinicia o timer para o (novo) pacote mais antigo não confirmado
             timerAtual = scheduler.schedule(this::onTimeout, TIMEOUT_MS, TimeUnit.MILLISECONDS);
         }
+    }
+
+    private void imprimirProgresso(long tamanhoArquivo, long inicioMs) {
+        long duracaoMs = Math.max(1, System.currentTimeMillis() - inicioMs);
+        long bytesConfirmados = Math.min((long) base * Pacote.MAX_DADOS, tamanhoArquivo);
+        double throughputKBps = (bytesConfirmados / 1024.0) / (duracaoMs / 1000.0);
+
+        System.out.printf("[Emissor] Progresso: enviados=%d | ACKs=%d | pacotes retransmitidos=%d "
+                        + "| timeouts=%d | throughput estimado=%.2f KB/s%n",
+                totalEnviados.get(),
+                totalAcksRecebidos.get(),
+                totalPacotesRetransmitidos.get(),
+                totalTimeouts.get(),
+                throughputKBps);
     }
 
     private void enviarPacoteBruto(Pacote pacote) throws IOException {
