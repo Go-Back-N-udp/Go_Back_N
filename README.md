@@ -249,13 +249,15 @@ O emissor exibe:
 - total de segmentos do arquivo;
 - total de pacotes enviados, incluindo retransmissões;
 - total de ACKs recebidos;
-- total de retransmissões;
+- total de pacotes retransmitidos;
+- total de eventos de timeout;
 - tempo total de transferência;
 - throughput estimado;
 - hash MD5 do arquivo original.
 
 Durante a transferência, o emissor também informa progresso periódico com a
-quantidade de pacotes enviados, ACKs recebidos e retransmissões.
+quantidade de pacotes enviados, ACKs recebidos, pacotes retransmitidos,
+eventos de timeout e throughput estimado.
 
 ### Receptor
 
