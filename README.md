@@ -4,6 +4,8 @@ Trabalho final da disciplina de Redes de Computadores. O projeto implementa
 uma transferência confiável de arquivos sobre UDP usando o protocolo
 Go-Back-N (GBN), conforme a proposta do enunciado.
 
+Feito por Gustavo Borin Nascimento e Gustavo Benfica Paulino.
+
 O sistema é dividido em dois módulos Java independentes:
 
 - `Receptor`: aguarda datagramas UDP, recebe os parâmetros da sessão por
