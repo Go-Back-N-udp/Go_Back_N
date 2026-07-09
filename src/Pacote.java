@@ -1,15 +1,6 @@
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
-/**
- * Representa um datagrama do protocolo Go-Back-N.
- *
- * Formato do cabeçalho (11 bytes) + payload (até MAX_DADOS bytes):
- *
- *  | tipo (1 byte) | num_seq (4 bytes) | num_ack (4 bytes) | tamanho_dados (2 bytes) | dados (até 1024 bytes) |
- *
- * tipo: 0 = DATA, 1 = ACK, 2 = HANDSHAKE, 3 = FIN
- */
 public class Pacote {
 
     public static final byte TIPO_DATA = 0;
@@ -18,7 +9,7 @@ public class Pacote {
     public static final byte TIPO_FIN = 3;
 
     public static final int MAX_DADOS = 1024;
-    public static final int TAMANHO_CABECALHO = 1 + 4 + 4 + 2; // 11 bytes
+    public static final int TAMANHO_CABECALHO = 1 + 4 + 4 + 2;
     public static final int TAMANHO_MAX_PACOTE = TAMANHO_CABECALHO + MAX_DADOS;
 
     private byte tipo;
@@ -34,8 +25,6 @@ public class Pacote {
         this.dados = dados == null ? new byte[0] : dados;
         this.tamanhoDados = (short) this.dados.length;
     }
-
-    // ---------- Getters ----------
 
     public byte getTipo() {
         return tipo;
@@ -57,11 +46,6 @@ public class Pacote {
         return dados;
     }
 
-    // ---------- Serialização ----------
-
-    /**
-     * Converte o pacote em um array de bytes pronto para envio via DatagramPacket.
-     */
     public byte[] serializar() {
         ByteBuffer buffer = ByteBuffer.allocate(TAMANHO_CABECALHO + dados.length);
         buffer.put(tipo);
@@ -72,9 +56,6 @@ public class Pacote {
         return buffer.array();
     }
 
-    /**
-     * Reconstrói um Pacote a partir dos bytes brutos recebidos via UDP.
-     */
     public static Pacote deserializar(byte[] bytesRecebidos, int tamanho) {
         ByteBuffer buffer = ByteBuffer.wrap(bytesRecebidos, 0, tamanho);
         byte tipo = buffer.get();
@@ -90,8 +71,6 @@ public class Pacote {
         return new Pacote(tipo, numSeq, numAck, dados);
     }
 
-    // ---------- Fábricas de conveniência ----------
-
     public static Pacote criarData(int numSeq, byte[] dados) {
         return new Pacote(TIPO_DATA, numSeq, -1, dados);
     }
@@ -104,10 +83,6 @@ public class Pacote {
         return new Pacote(TIPO_FIN, numSeq, -1, null);
     }
 
-    /**
-     * Pacote de handshake: o payload carrega, em texto, os parâmetros da sessão
-     * separados por '|': probabilidadePerda|pathDestino|tamanhoArquivo
-     */
     public static Pacote criarHandshake(double probPerda, String pathDestino, long tamanhoArquivo) {
         String payload = probPerda + "|" + pathDestino + "|" + tamanhoArquivo;
         return new Pacote(TIPO_HANDSHAKE, -1, -1, payload.getBytes());

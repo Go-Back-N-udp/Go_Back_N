@@ -9,20 +9,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Random;
 
-/**
- * Módulo Receptor do protocolo Go-Back-N (GBN) sobre UDP.
- *
- * FSM do receptor (único estado, conforme Kurose & Ross, Figura 3.21):
- *  - Aceita um pacote DATA somente se numSeq == expectedSeqNum.
- *      -> entrega o payload, envia ACK(expectedSeqNum) e incrementa expectedSeqNum.
- *  - Se numSeq != expectedSeqNum (pacote fora de ordem), descarta e reenvia
- *    o último ACK (ACK(expectedSeqNum - 1)).
- *
- * Adicionalmente, simula perda de pacotes: para cada pacote DATA recebido
- * corretamente EM ORDEM, sorteia r em [0,1). Se r < probPerda, descarta o
- * pacote silenciosamente (sem ACK, sem entregar, sem avançar expectedSeqNum),
- * como se o pacote nunca tivesse chegado.
- */
 public class Receptor {
 
     private static final int TAMANHO_BUFFER = Pacote.TAMANHO_MAX_PACOTE;
@@ -54,7 +40,6 @@ public class Receptor {
         try (DatagramSocket socket = new DatagramSocket(porta)) {
             System.out.println("[Receptor] Aguardando handshake na porta " + porta + "...");
 
-            // ---------- 1) Handshake ----------
             byte[] bufHandshake = new byte[TAMANHO_BUFFER];
             DatagramPacket dgHandshake = new DatagramPacket(bufHandshake, bufHandshake.length);
             socket.receive(dgHandshake);
@@ -77,18 +62,15 @@ public class Receptor {
             System.out.println("[Receptor] probPerda=" + probPerda + " pathDestino=" + pathDestino
                     + " tamanhoArquivo=" + tamanhoArquivo + " bytes");
 
-            // ACK do handshake (ack = -1 sinaliza confirmação do handshake; usamos ack=0 por simplicidade,
-            // já que o primeiro pacote de dados terá seqnum=0)
             enviarAck(socket, enderecoEmissor, portaEmissor, -1);
 
-            // ---------- 2) Recepção dos dados (FSM do receptor) ----------
             int expectedSeqNum = 0;
             int ultimoAckEnviado = -1;
 
-            long totalRecebidosEmOrdem = 0;   // pacotes DATA aceitos em ordem (antes do filtro de perda)
-            long totalEntreguesComSucesso = 0; // pacotes DATA realmente entregues (não descartados pela simulação)
+            long totalRecebidosEmOrdem = 0;
+            long totalEntreguesComSucesso = 0;
             long totalForaDeOrdem = 0;
-            long totalDescartadosSimulado = 0; // perdas simuladas
+            long totalDescartadosSimulado = 0;
 
             try (FileOutputStream fos = new FileOutputStream(pathDestino)) {
                 MessageDigest md5 = obterMd5();
@@ -109,30 +91,25 @@ public class Receptor {
                     }
 
                     if (pacote.getTipo() != Pacote.TIPO_DATA) {
-                        // Ignora tipos inesperados (ex.: handshake duplicado)
                         continue;
                     }
 
                     if (pacote.getNumSeq() != expectedSeqNum) {
-                        // Pacote fora de ordem: descarta e reenvia o último ACK
                         totalForaDeOrdem++;
                         enviarAck(socket, dg.getAddress(), dg.getPort(), ultimoAckEnviado);
                         continue;
                     }
 
-                    // Pacote em ordem
                     totalRecebidosEmOrdem++;
 
                     double r = random.nextDouble();
                     if (r < probPerda) {
-                        // Simula perda: NÃO entrega, NÃO envia ACK, NÃO avança expectedSeqNum
                         totalDescartadosSimulado++;
                         System.out.println("[Receptor] Pacote seq=" + pacote.getNumSeq()
                                 + " descartado (perda simulada, r=" + String.format("%.3f", r) + ")");
                         continue;
                     }
 
-                    // Entrega o pacote: grava no arquivo, atualiza hash, avança a FSM
                     fos.write(pacote.getDados());
                     if (md5 != null) {
                         md5.update(pacote.getDados());
@@ -150,7 +127,6 @@ public class Receptor {
 
                 fos.flush();
 
-                // ---------- 3) Estatísticas finais ----------
                 long totalPacotesProcessados = totalRecebidosEmOrdem + totalForaDeOrdem;
                 double taxaPerdaEfetiva = totalRecebidosEmOrdem == 0
                         ? 0.0

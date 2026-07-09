@@ -16,21 +16,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.nio.charset.StandardCharsets;
 
-/**
- * Módulo Emissor do protocolo Go-Back-N (GBN) sobre UDP.
- *
- * FSM do emissor (Kurose & Ross, Figura 3.20), com duas threads:
- *  - Thread principal: lê o arquivo em segmentos e os envia respeitando a
- *    janela [base, base+N), reage a "chamadas de cima" (novos segmentos).
- *  - Thread de recepção de ACKs: ouve ACKs cumulativos do receptor e avança
- *    a base da janela.
- *  - Um único temporizador (ScheduledExecutorService) cuida do pacote mais
- *    antigo não confirmado (base). Timeout -> retransmite tudo de base até
- *    nextSeqNum - 1.
- *
- * Uso:
- *   java Emissor <arquivo_origem> <IP_destino>:<path_destino> <tamanho_janela> <prob_perda> [porta]
- */
 public class Emissor {
 
     private static final int TIMEOUT_MS = 500;
@@ -38,12 +23,11 @@ public class Emissor {
     private static final int PORTA_MINIMA = 1;
     private static final int PORTA_MAXIMA = 65535;
 
-    // ---- Estado compartilhado entre as threads de envio e de recepção de ACK ----
     private final Object lock = new Object();
     private int base = 0;
     private int nextSeqNum = 0;
     private int windowSize;
-    private List<Pacote> bufferEnvio; // buffer circular lógico: pacotes[seq % capacidade]
+    private List<Pacote> bufferEnvio;
 
     private ScheduledExecutorService scheduler;
     private ScheduledFuture<?> timerAtual;
@@ -52,7 +36,6 @@ public class Emissor {
     private InetAddress enderecoDestino;
     private int portaDestino;
 
-    // ---- Estatísticas ----
     private final AtomicLong totalEnviados = new AtomicLong(0);
     private final AtomicLong totalAcksRecebidos = new AtomicLong(0);
     private final AtomicLong totalPacotesRetransmitidos = new AtomicLong(0);
@@ -174,7 +157,6 @@ public class Emissor {
         System.out.println("[Emissor] Conectando a " + ipDestino + ":" + portaDestino
                 + " | janela=" + windowSize + " | probPerda=" + probPerda);
 
-        // ---------- 1) Handshake ----------
         Pacote handshake = Pacote.criarHandshake(probPerda, pathDestino, tamanhoArquivo);
         enviarPacoteBruto(handshake);
 
@@ -182,7 +164,7 @@ public class Emissor {
         byte[] bufAck = new byte[Pacote.TAMANHO_MAX_PACOTE];
         DatagramPacket dgAck = new DatagramPacket(bufAck, bufAck.length);
         try {
-            socket.receive(dgAck); // aguarda confirmação do handshake
+            socket.receive(dgAck);
             System.out.println("[Emissor] Handshake confirmado pelo Receptor.");
         } catch (IOException e) {
             System.err.println("[Emissor] Timeout aguardando confirmação do handshake. Abortando.");
@@ -190,11 +172,8 @@ public class Emissor {
             scheduler.shutdownNow();
             return;
         }
-        socket.setSoTimeout(0); // a thread de recepção de ACKs ficará bloqueada normalmente
+        socket.setSoTimeout(0);
 
-        // ---------- 2) Carrega todos os segmentos do arquivo em memória como "buffer" ----------
-        // (mantém o buffer indexado por seqnum % algo grande o suficiente; aqui usamos lista direta
-        //  já que conhecemos o total de segmentos antecipadamente)
         List<byte[]> segmentos = lerSegmentos(arquivo);
         int totalSegmentos = segmentos.size();
         System.out.println("[Emissor] Arquivo dividido em " + totalSegmentos + " segmentos de até "
@@ -207,27 +186,23 @@ public class Emissor {
         String hashOriginal = bytesParaHex(md5.digest());
         System.out.println("[Emissor] Hash MD5 do arquivo original: " + hashOriginal);
 
-        // Pré-monta todos os pacotes DATA (índice = numSeq)
         List<Pacote> todosPacotes = new ArrayList<>(totalSegmentos);
         for (int i = 0; i < totalSegmentos; i++) {
             todosPacotes.add(Pacote.criarData(i, segmentos.get(i)));
         }
 
-        // ---------- 3) Início da medição e thread de recepção de ACKs ----------
         long inicioMs = System.currentTimeMillis();
 
         Thread threadAcks = new Thread(() -> escutarAcks(totalSegmentos, tamanhoArquivo, inicioMs));
         threadAcks.setDaemon(true);
         threadAcks.start();
 
-        // ---------- 4) FSM do emissor: envia respeitando a janela ----------
-        int proximoASerEnviado = 0; // índice no array todosPacotes
+        int proximoASerEnviado = 0;
         while (true) {
             synchronized (lock) {
                 if (base >= totalSegmentos) {
-                    break; // todos os pacotes foram confirmados
+                    break;
                 }
-                // Envia tudo que couber na janela e ainda não foi enviado
                 while (proximoASerEnviado < totalSegmentos && nextSeqNum < base + windowSize) {
                     Pacote pacote = todosPacotes.get(proximoASerEnviado);
                     enviarPacoteBruto(pacote);
@@ -240,7 +215,6 @@ public class Emissor {
                     }
 
                     if (base == nextSeqNum) {
-                        // único timer ativo, referente ao pacote 'base'
                         reiniciarTimer(todosPacotes, totalSegmentos);
                     }
 
@@ -254,12 +228,11 @@ public class Emissor {
             }
 
             try {
-                Thread.sleep(2); // evita busy-waiting agressivo
+                Thread.sleep(2);
             } catch (InterruptedException ignored) {
             }
         }
 
-        // ---------- 5) Encerramento ----------
         cancelarTimer();
         transmissaoFinalizada.set(true);
 
@@ -289,9 +262,6 @@ public class Emissor {
         scheduler.shutdownNow();
     }
 
-    /**
-     * Thread dedicada a escutar ACKs cumulativos vindos do Receptor e avançar a base da janela.
-     */
     private void escutarAcks(int totalSegmentos, long tamanhoArquivo, long inicioMs) {
         byte[] buf = new byte[Pacote.TAMANHO_MAX_PACOTE];
         while (!transmissaoFinalizada.get()) {
@@ -309,16 +279,13 @@ public class Emissor {
 
                 synchronized (lock) {
                     if (numAck >= base) {
-                        // ACK cumulativo: avança a base para n+1
                         base = numAck + 1;
 
                         if (base >= totalSegmentos) {
                             cancelarTimer();
                         } else if (base == nextSeqNum) {
-                            // não há mais pacotes não confirmados: cancela o timer
                             cancelarTimer();
                         } else {
-                            // ainda há pacotes não confirmados: reinicia o timer
                             reiniciarTimerSemLer();
                         }
 
@@ -326,21 +293,13 @@ public class Emissor {
                             imprimirProgresso(tamanhoArquivo, inicioMs);
                         }
                     }
-                    // ACKs antigos/duplicados (numAck < base) são ignorados, como manda a FSM do GBN
                 }
             } catch (IOException e) {
-                if (!transmissaoFinalizada.get()) {
-                    // socket pode ter sido fechado ao final da transmissão; ignora nesse caso
-                }
                 break;
             }
         }
     }
 
-    /**
-     * Reinicia o temporizador associado ao pacote 'base', cancelando o anterior se existir.
-     * Usada quando ainda não se conhece a lista de pacotes prontos (apenas reagenda).
-     */
     private void reiniciarTimerSemLer() {
         cancelarTimerInterno();
         timerAtual = scheduler.schedule(this::onTimeout, TIMEOUT_MS, TimeUnit.MILLISECONDS);
@@ -364,10 +323,6 @@ public class Emissor {
         }
     }
 
-    /**
-     * Callback de timeout: retransmite todos os pacotes de base até nextSeqNum - 1
-     * e reinicia o temporizador, exatamente como descrito na FSM do GBN.
-     */
     private void onTimeout() {
         synchronized (lock) {
             if (transmissaoFinalizada.get() || base >= nextSeqNum) {
@@ -389,7 +344,6 @@ public class Emissor {
                 }
             }
 
-            // reinicia o timer para o (novo) pacote mais antigo não confirmado
             timerAtual = scheduler.schedule(this::onTimeout, TIMEOUT_MS, TimeUnit.MILLISECONDS);
         }
     }
